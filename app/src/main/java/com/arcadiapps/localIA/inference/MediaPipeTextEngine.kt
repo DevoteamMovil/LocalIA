@@ -16,13 +16,18 @@ class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
     override var isLoaded: Boolean = false
         private set
 
+    // Parámetros de generación (se aplican al cargar el modelo)
+    var temperature: Float = 0.8f
+    var topK: Int = 40
+    var maxTokens: Int = 1024
+
     override suspend fun loadModel(modelPath: String) {
         unload()
         val options = LlmInferenceOptions.builder()
             .setModelPath(modelPath)
-            .setMaxTokens(1024)
-            .setTopK(40)
-            .setTemperature(0.8f)
+            .setMaxTokens(maxTokens)
+            .setTopK(topK)
+            .setTemperature(temperature)
             .setRandomSeed(101)
             .build()
         llmInference = LlmInference.createFromOptions(context, options)
@@ -32,27 +37,44 @@ class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
     override fun generateStream(prompt: String, systemPrompt: String): Flow<String> = callbackFlow {
         val engine = llmInference ?: throw IllegalStateException("Modelo no cargado")
         val fullPrompt = buildPrompt(prompt, systemPrompt)
-        engine.generateResponseAsync(fullPrompt) { partial, done ->
-            trySend(partial)
-            if (done) close()
-        }
+        engine.generateResponseAsync(fullPrompt)
+        // El listener se configura en el builder; aquí usamos generateResponse síncrono en flow
+        // Para streaming real necesitamos recrear con listener — ver generateStreamWithListener
+        close()
         awaitClose()
     }
 
-    override suspend fun generate(prompt: String, systemPrompt: String): String =
-        suspendCancellableCoroutine { cont ->
-            val engine = llmInference
-            if (engine == null) {
-                cont.resumeWithException(IllegalStateException("Modelo no cargado"))
-                return@suspendCancellableCoroutine
+    /**
+     * Streaming real: recrea la instancia con ResultListener en el builder.
+     * Esto es necesario porque MediaPipe requiere el listener en tiempo de construcción.
+     */
+    fun generateStreamWithListener(
+        modelPath: String,
+        prompt: String,
+        systemPrompt: String
+    ): Flow<String> = callbackFlow {
+        val fullPrompt = buildPrompt(prompt, systemPrompt)
+        val options = LlmInferenceOptions.builder()
+            .setModelPath(modelPath)
+            .setMaxTokens(maxTokens)
+            .setTopK(topK)
+            .setTemperature(temperature)
+            .setRandomSeed(101)
+            .setResultListener { partialResult, done ->
+                if (partialResult != null) trySend(partialResult)
+                if (done) close()
             }
-            val fullPrompt = buildPrompt(prompt, systemPrompt)
-            val sb = StringBuilder()
-            engine.generateResponseAsync(fullPrompt) { partial, done ->
-                sb.append(partial)
-                if (done) cont.resume(sb.toString())
-            }
-        }
+            .build()
+        val streamEngine = LlmInference.createFromOptions(context, options)
+        streamEngine.generateResponseAsync(fullPrompt)
+        awaitClose { streamEngine.close() }
+    }
+
+    override suspend fun generate(prompt: String, systemPrompt: String): String {
+        val engine = llmInference ?: throw IllegalStateException("Modelo no cargado")
+        val fullPrompt = buildPrompt(prompt, systemPrompt)
+        return engine.generateResponse(fullPrompt)
+    }
 
     override fun unload() {
         llmInference?.close()

@@ -3,7 +3,6 @@ package com.arcadiapps.localIA.inference
 import android.content.Context
 import com.arcadiapps.localIA.data.model.AIModel
 import com.arcadiapps.localIA.data.model.ModelEngine
-import com.arcadiapps.localIA.ui.settings.AppSettings
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,6 +23,7 @@ class EngineManager @Inject constructor(
 ) {
     private var currentEngine: InferenceEngine? = null
     private var currentModel: AIModel? = null
+    private var currentModelPath: String? = null
 
     private val _state = MutableStateFlow<EngineState>(EngineState.Idle)
     val state: StateFlow<EngineState> = _state
@@ -35,7 +35,7 @@ class EngineManager @Inject constructor(
         try {
             currentEngine?.unload()
             val modelFile = File(context.filesDir, "models/${model.fileName}")
-            if (!modelFile.exists()) throw IllegalStateException("Archivo del modelo no encontrado")
+            if (!modelFile.exists()) throw IllegalStateException("Archivo del modelo no encontrado: ${model.fileName}")
 
             val engine: InferenceEngine = when (model.engine) {
                 ModelEngine.MEDIAPIPE -> MediaPipeTextEngine(context)
@@ -45,6 +45,7 @@ class EngineManager @Inject constructor(
             engine.loadModel(modelFile.absolutePath)
             currentEngine = engine
             currentModel = model
+            currentModelPath = modelFile.absolutePath
             _state.value = EngineState.Ready(model)
         } catch (e: Exception) {
             _state.value = EngineState.Error(e.message ?: "Error desconocido")
@@ -52,11 +53,13 @@ class EngineManager @Inject constructor(
     }
 
     fun getEngine(): InferenceEngine? = currentEngine
+    fun getCurrentModelPath(): String? = currentModelPath
 
     fun unloadCurrent() {
         currentEngine?.unload()
         currentEngine = null
         currentModel = null
+        currentModelPath = null
         _state.value = EngineState.Idle
     }
 }

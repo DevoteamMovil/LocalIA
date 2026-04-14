@@ -19,10 +19,10 @@ target_include_directories(localIA_jni PRIVATE
     ${LLAMA_DIR}
     ${LLAMA_DIR}/common
 )
-
-target_link_libraries(localIA_jni
-    android
-    log
-    $<$<BOOL:${EXISTS ${LLAMA_DIR}/CMakeLists.txt}>:llama>
-    $<$<BOOL:${EXISTS ${LLAMA_DIR}/CMakeLists.txt}>:common>
+cmake
+target_link_libraries(${CMAKE_PROJECT_NAME}
+        # Librerías de Android por defecto android
+        log
+        # Aquí es donde fallaba. La sintaxis correcta si quieres usar condicionales es:
+        $<$<BOOL:true>:jnigraphics> 
 )

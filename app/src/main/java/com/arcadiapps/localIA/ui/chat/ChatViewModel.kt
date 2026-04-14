@@ -1,6 +1,5 @@
 package com.arcadiapps.localIA.ui.chat
 
-import android.graphics.Bitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.arcadiapps.localIA.data.model.ChatMessage
@@ -10,8 +9,7 @@ import com.arcadiapps.localIA.data.model.MessageType
 import com.arcadiapps.localIA.data.repository.ChatRepository
 import com.arcadiapps.localIA.data.repository.ModelRepository
 import com.arcadiapps.localIA.inference.EngineManager
-import com.arcadiapps.localIA.inference.EngineState
-import com.arcadiapps.localIA.ui.settings.AppSettings
+import com.arcadiapps.localIA.inference.MediaPipeTextEngine
 import com.arcadiapps.localIA.ui.settings.SettingsDataSource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.*
@@ -78,11 +76,10 @@ class ChatViewModel @Inject constructor(
             return
         }
 
-        val settings = settingsDataSource.settings.first()
-        val effectiveSystemPrompt = systemPrompt.ifBlank { settings.systemPrompt }
-        val imagePath = _uiState.value.pendingImagePath
-
         viewModelScope.launch {
+            val settings = settingsDataSource.settings.first()
+            val effectiveSystemPrompt = systemPrompt.ifBlank { settings.systemPrompt }
+            val imagePath = _uiState.value.pendingImagePath
             // Guardar mensaje del usuario
             val userMsg = ChatMessage(
                 sessionId = session.id,
@@ -109,11 +106,13 @@ class ChatViewModel @Inject constructor(
 
             val sb = StringBuilder()
             try {
-                if (settings.streamingEnabled) {
-                    engine.generateStream(promptWithContext, effectiveSystemPrompt).collect { token ->
-                        sb.append(token)
-                        _uiState.update { it.copy(streamingText = sb.toString()) }
-                    }
+                val modelPath = engineManager.getCurrentModelPath()
+                if (settings.streamingEnabled && engine is MediaPipeTextEngine && modelPath != null) {
+                    engine.generateStreamWithListener(modelPath, promptWithContext, effectiveSystemPrompt)
+                        .collect { token ->
+                            sb.append(token)
+                            _uiState.update { it.copy(streamingText = sb.toString()) }
+                        }
                 } else {
                     val result = engine.generate(promptWithContext, effectiveSystemPrompt)
                     sb.append(result)
