@@ -1,0 +1,3 @@
+-keep class com.arcadiapps.localIA.data.model.** { *; }
+-keep class com.google.mediapipe.** { *; }
+-dontwarn com.google.mediapipe.**
