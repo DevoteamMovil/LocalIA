@@ -1,7 +1,6 @@
 package com.arcadiapps.localIA.ui.chat
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.arcadiapps.localIA.data.model.ChatMessage
@@ -12,7 +11,8 @@ import com.arcadiapps.localIA.data.repository.ChatRepository
 import com.arcadiapps.localIA.data.repository.ModelRepository
 import com.arcadiapps.localIA.inference.EngineManager
 import com.arcadiapps.localIA.inference.EngineState
-import com.arcadiapps.localIA.ui.settings.SettingsViewModel
+import com.arcadiapps.localIA.ui.settings.AppSettings
+import com.arcadiapps.localIA.ui.settings.SettingsDataSource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -34,7 +34,7 @@ class ChatViewModel @Inject constructor(
     private val chatRepository: ChatRepository,
     private val modelRepository: ModelRepository,
     private val engineManager: EngineManager,
-    private val settingsViewModel: SettingsViewModel
+    private val settingsDataSource: SettingsDataSource
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatUiState())
@@ -78,7 +78,7 @@ class ChatViewModel @Inject constructor(
             return
         }
 
-        val settings = settingsViewModel.settings.value
+        val settings = settingsDataSource.settings.first()
         val effectiveSystemPrompt = systemPrompt.ifBlank { settings.systemPrompt }
         val imagePath = _uiState.value.pendingImagePath
 
