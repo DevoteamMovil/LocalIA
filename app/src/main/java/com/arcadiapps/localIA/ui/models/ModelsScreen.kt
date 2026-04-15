@@ -24,6 +24,7 @@ fun ModelsScreen(
     val models by viewModel.models.collectAsState()
     val activeModel by viewModel.activeModel.collectAsState()
     val engineState by viewModel.engineState.collectAsState()
+    val downloadError by viewModel.downloadError.collectAsState()
 
     var selectedFilter by remember { mutableStateOf<ModelType?>(null) }
 
@@ -43,6 +44,30 @@ fun ModelsScreen(
         }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+
+            // Banner de error de descarga
+            downloadError?.let { error ->
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Error: $error",
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { viewModel.clearDownloadError() }) {
+                            Text("OK")
+                        }
+                    }
+                }
+            }
+
             // Filtros por tipo
             FilterChips(
                 selected = selectedFilter,
