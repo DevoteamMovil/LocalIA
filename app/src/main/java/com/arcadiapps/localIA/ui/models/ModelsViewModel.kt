@@ -1,6 +1,7 @@
 package com.arcadiapps.localIA.ui.models
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
@@ -60,7 +61,8 @@ class ModelsViewModel @Inject constructor(
             val info = workInfos?.firstOrNull() ?: return@observeForever
             when (info.state) {
                 WorkInfo.State.FAILED -> {
-                    val error = info.outputData.getString("error") ?: "Error en la descarga"
+                    val error = info.outputData.getString("error") ?: "Error desconocido en la descarga"
+                    Log.e("ModelsViewModel", "Worker falló: $error")
                     _downloadError.value = error
                     viewModelScope.launch {
                         repository.updateDownloadProgress(model.id, 0, ModelStatus.ERROR)
@@ -70,6 +72,9 @@ class ModelsViewModel @Inject constructor(
                     viewModelScope.launch {
                         repository.updateDownloadProgress(model.id, 100, ModelStatus.READY)
                     }
+                }
+                WorkInfo.State.BLOCKED -> {
+                    _downloadError.value = "Sin conexión a internet"
                 }
                 else -> {}
             }
