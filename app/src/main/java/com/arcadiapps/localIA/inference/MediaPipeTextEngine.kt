@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession.LlmInferenceSessionOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -11,9 +13,14 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 
+/**
+ * Motor MediaPipe LLM Inference API v0.10.33+
+ * Nueva arquitectura: LlmInference (carga modelo) + LlmInferenceSession (generación)
+ */
 class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
 
     private var llmInference: LlmInference? = null
+
     override var isLoaded: Boolean = false
         private set
 
@@ -26,107 +33,84 @@ class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
     }
 
     override suspend fun loadModel(modelPath: String) {
-        withContext(Dispatchers.IO) {
-            Log.d(TAG, "Cargando modelo desde: $modelPath")
+        withContext(Dispatchers.Main) {
+            Log.d(TAG, "Cargando modelo: $modelPath")
             unload()
             try {
                 val options = LlmInferenceOptions.builder()
                     .setModelPath(modelPath)
                     .setMaxTokens(maxTokens)
-                    .setTopK(topK)
-                    .setTemperature(temperature)
-                    .setRandomSeed(101)
+                    .setMaxTopK(topK)
                     .build()
                 llmInference = LlmInference.createFromOptions(context, options)
                 isLoaded = true
-                Log.d(TAG, "Modelo cargado correctamente")
+                Log.d(TAG, "Modelo cargado OK")
             } catch (e: Exception) {
-                Log.e(TAG, "Error al cargar modelo", e)
+                Log.e(TAG, "Error cargando modelo", e)
+                isLoaded = false
                 throw e
             }
         }
     }
 
-    override fun generateStream(prompt: String, systemPrompt: String): Flow<String> =
-        generateStreamWithListener(llmInference, buildPrompt(prompt, systemPrompt))
-
-    fun generateStreamWithListener(
-        modelPath: String,
-        prompt: String,
-        systemPrompt: String
-    ): Flow<String> = callbackFlow<String> {
+    override fun generateStream(prompt: String, systemPrompt: String): Flow<String> = callbackFlow {
+        val inference = llmInference ?: run { close(IllegalStateException("Modelo no cargado")); awaitClose(); return@callbackFlow }
         val fullPrompt = buildPrompt(prompt, systemPrompt)
-        Log.d(TAG, "Generando con listener, prompt length: ${fullPrompt.length}")
+        Log.d(TAG, "Iniciando streaming")
         try {
-            val options = LlmInferenceOptions.builder()
-                .setModelPath(modelPath)
-                .setMaxTokens(maxTokens)
+            val sessionOptions = LlmInferenceSessionOptions.builder()
                 .setTopK(topK)
                 .setTemperature(temperature)
                 .setRandomSeed(101)
-                .setResultListener { partialResult, done ->
-                    if (!partialResult.isNullOrEmpty()) trySend(partialResult)
-                    if (done) close()
-                }
-                .setErrorListener { e ->
-                    Log.e(TAG, "Error en generación", e)
-                    close(e)
-                }
                 .build()
-            val streamEngine = LlmInference.createFromOptions(context, options)
-            streamEngine.generateResponseAsync(fullPrompt)
-            awaitClose { streamEngine.close() }
+            val session = LlmInferenceSession.createFromOptions(inference, sessionOptions)
+            session.addQueryChunk(fullPrompt)
+            val future = session.generateResponseAsync { partial, done ->
+                if (!partial.isNullOrEmpty()) trySend(partial)
+                if (done) close()
+            }
+            awaitClose {
+                try { future.cancel(true) } catch (_: Exception) {}
+                try { session.close() } catch (_: Exception) {}
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Error al crear engine para streaming", e)
+            Log.e(TAG, "Error en streaming", e)
             close(e)
             awaitClose()
         }
-    }.flowOn(Dispatchers.IO)
+    }.flowOn(Dispatchers.Main)
 
     override suspend fun generate(prompt: String, systemPrompt: String): String =
-        withContext(Dispatchers.IO) {
-            val engine = llmInference ?: throw IllegalStateException("Modelo no cargado")
+        withContext(Dispatchers.Main) {
+            val inference = llmInference ?: throw IllegalStateException("Modelo no cargado")
             val fullPrompt = buildPrompt(prompt, systemPrompt)
-            Log.d(TAG, "Generando respuesta síncrona")
-            engine.generateResponse(fullPrompt)
+            val sessionOptions = LlmInferenceSessionOptions.builder()
+                .setTopK(topK)
+                .setTemperature(temperature)
+                .setRandomSeed(101)
+                .build()
+            val session = LlmInferenceSession.createFromOptions(inference, sessionOptions)
+            session.addQueryChunk(fullPrompt)
+            val result = session.generateResponse()
+            session.close()
+            result
         }
 
     override fun unload() {
-        try {
-            llmInference?.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error al cerrar engine: ${e.message}")
-        }
+        try { llmInference?.close() } catch (_: Exception) {}
         llmInference = null
         isLoaded = false
     }
 
-    private fun generateStreamWithListener(
-        engine: LlmInference?,
-        fullPrompt: String
-    ): Flow<String> = callbackFlow {
-        if (engine == null) {
-            close(IllegalStateException("Modelo no cargado"))
-            awaitClose()
-            return@callbackFlow
-        }
-        // LlmInference sin listener solo soporta generateResponse síncrono
-        // Emitimos el resultado completo como un solo token
-        try {
-            val result = engine.generateResponse(fullPrompt)
-            trySend(result)
-            close()
-        } catch (e: Exception) {
-            close(e)
-        }
-        awaitClose()
-    }.flowOn(Dispatchers.IO)
-
-    private fun buildPrompt(userMessage: String, systemPrompt: String): String {
-        return if (systemPrompt.isNotBlank()) {
-            "<|im_start|>system\n$systemPrompt<|im_end|>\n<|im_start|>user\n$userMessage<|im_end|>\n<|im_start|>assistant\n"
-        } else {
-            "<|im_start|>user\n$userMessage<|im_end|>\n<|im_start|>assistant\n"
-        }
+    fun cancelGeneration() {
+        // LlmInferenceSession.cancelGenerateResponseAsync() se llama desde el flow
+        // El job de coroutine ya se cancela desde ChatViewModel
+        // Esta función existe para compatibilidad futura con cancelación nativa
     }
+
+    private fun buildPrompt(user: String, system: String): String =
+        if (system.isNotBlank())
+            "<|im_start|>system\n$system<|im_end|>\n<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n"
+        else
+            "<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n"
 }

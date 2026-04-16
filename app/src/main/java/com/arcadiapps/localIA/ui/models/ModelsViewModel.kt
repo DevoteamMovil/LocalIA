@@ -13,11 +13,13 @@ import com.arcadiapps.localIA.inference.EngineManager
 import com.arcadiapps.localIA.worker.ModelDownloadWorker
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -100,4 +102,46 @@ class ModelsViewModel @Inject constructor(
     }
 
     fun clearDownloadError() { _downloadError.value = null }
+
+    fun importLocalModel(
+        uri: android.net.Uri,
+        displayName: String,
+        context: android.content.Context,
+        onComplete: (Boolean, String) -> Unit
+    ) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val modelsDir = java.io.File(context.filesDir, "models")
+                modelsDir.mkdirs()
+                val inputStream = context.contentResolver.openInputStream(uri)
+                    ?: throw Exception("No se pudo abrir el archivo")
+                val fileName = uri.lastPathSegment?.substringAfterLast("/") ?: "modelo_importado.gguf"
+                val destFile = java.io.File(modelsDir, fileName)
+                inputStream.use { input ->
+                    destFile.outputStream().use { output -> input.copyTo(output) }
+                }
+                // Registrar en la base de datos
+                val model = com.arcadiapps.localIA.data.model.AIModel(
+                    id = "local_${System.currentTimeMillis()}",
+                    name = displayName,
+                    description = "Modelo importado localmente",
+                    type = com.arcadiapps.localIA.data.model.ModelType.TEXT,
+                    engine = com.arcadiapps.localIA.data.model.ModelEngine.LLAMA_CPP,
+                    sizeBytes = destFile.length(),
+                    downloadUrl = "",
+                    fileName = fileName,
+                    status = com.arcadiapps.localIA.data.model.ModelStatus.READY,
+                    recommendedTier = com.arcadiapps.localIA.data.model.DeviceTier.MEDIUM
+                )
+                repository.insertModel(model)
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onComplete(true, "✓ Modelo importado correctamente")
+                }
+            } catch (e: Exception) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onComplete(false, "Error: ${e.message}")
+                }
+            }
+        }
+    }
 }

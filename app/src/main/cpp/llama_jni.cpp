@@ -1,86 +1,70 @@
 #include <jni.h>
 #include <string>
+#include <vector>
 #include <android/log.h>
 
-#define LOG_TAG "LocalIA_JNI"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOG_TAG "LlamaCpp_JNI"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Incluir llama.cpp solo si está disponible como submodule
-#if __has_include("llama.h")
 #include "llama.h"
-#include "common/common.h"
-#define LLAMA_AVAILABLE 1
-#else
-#define LLAMA_AVAILABLE 0
-#endif
+
+struct LlamaHandle {
+    llama_model   *model = nullptr;
+    llama_context *ctx   = nullptr;
+};
 
 extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_com_arcadiapps_localIA_inference_LlamaCppEngine_nativeInit(
-        JNIEnv *env, jobject /* this */, jstring modelPath, jint nThreads, jint nCtx) {
-#if LLAMA_AVAILABLE
-    const char *path = env->GetStringUTFChars(modelPath, nullptr);
+        JNIEnv *env, jobject, jstring jModelPath, jint nThreads, jint nCtx) {
+
+    const char *path = env->GetStringUTFChars(jModelPath, nullptr);
     LOGI("Cargando modelo: %s", path);
 
     llama_model_params mparams = llama_model_default_params();
-    mparams.n_gpu_layers = 0; // CPU-only por defecto en Android
+    mparams.n_gpu_layers = 0;
 
-    llama_model *model = llama_load_model_from_file(path, mparams);
-    env->ReleaseStringUTFChars(modelPath, path);
+    llama_model *model = llama_model_load_from_file(path, mparams);
+    env->ReleaseStringUTFChars(jModelPath, path);
 
-    if (!model) {
-        LOGE("Error al cargar el modelo");
-        return 0L;
-    }
+    if (!model) { LOGE("Error al cargar modelo"); return 0L; }
 
     llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = nCtx;
-    cparams.n_threads = nThreads;
-    cparams.n_threads_batch = nThreads;
+    cparams.n_ctx           = (uint32_t)nCtx;
+    cparams.n_threads       = (uint32_t)nThreads;
+    cparams.n_threads_batch = (uint32_t)nThreads;
 
-    llama_context *ctx = llama_new_context_with_model(model, cparams);
-    if (!ctx) {
-        llama_free_model(model);
-        LOGE("Error al crear contexto");
-        return 0L;
-    }
+    llama_context *ctx = llama_init_from_model(model, cparams);
+    if (!ctx) { llama_model_free(model); LOGE("Error al crear contexto"); return 0L; }
 
-    // Empaquetar model + ctx en un struct heap-allocated
-    struct LlamaHandle { llama_model *model; llama_context *ctx; };
     auto *handle = new LlamaHandle{model, ctx};
+    LOGI("Modelo cargado OK");
     return reinterpret_cast<jlong>(handle);
-#else
-    LOGE("llama.cpp no disponible en esta build");
-    return 0L;
-#endif
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_arcadiapps_localIA_inference_LlamaCppEngine_nativeGenerate(
-        JNIEnv *env, jobject /* this */, jlong handle, jstring prompt,
-        jint maxTokens, jfloat temperature, jint topK) {
-#if LLAMA_AVAILABLE
-    if (handle == 0L) return env->NewStringUTF("[Error: modelo no cargado]");
+        JNIEnv *env, jobject, jlong jHandle,
+        jstring jPrompt, jint maxTokens, jfloat temperature, jint topK) {
 
-    struct LlamaHandle { llama_model *model; llama_context *ctx; };
-    auto *h = reinterpret_cast<LlamaHandle *>(handle);
+    if (!jHandle) return env->NewStringUTF("[Error: modelo no cargado]");
+    auto *h = reinterpret_cast<LlamaHandle *>(jHandle);
 
-    const char *promptStr = env->GetStringUTFChars(prompt, nullptr);
-    std::string result;
+    const char *promptStr = env->GetStringUTFChars(jPrompt, nullptr);
+    const llama_vocab *vocab = llama_model_get_vocab(h->model);
 
-    // Tokenizar
-    std::vector<llama_token> tokens(llama_n_ctx(h->ctx));
-    int nTokens = llama_tokenize(h->model, promptStr, strlen(promptStr),
-                                  tokens.data(), tokens.size(), true, true);
-    env->ReleaseStringUTFChars(prompt, promptStr);
+    // Tokenizar — primera pasada para obtener el tamaño
+    int nTokens = -llama_tokenize(vocab, promptStr, (int32_t)strlen(promptStr),
+                                   nullptr, 0, true, true);
+    std::vector<llama_token> tokens(nTokens);
+    llama_tokenize(vocab, promptStr, (int32_t)strlen(promptStr),
+                   tokens.data(), nTokens, true, true);
+    env->ReleaseStringUTFChars(jPrompt, promptStr);
 
-    if (nTokens < 0) return env->NewStringUTF("[Error: tokenización fallida]");
-    tokens.resize(nTokens);
-
-    // Batch
-    llama_batch batch = llama_batch_get_one(tokens.data(), nTokens, 0, 0);
+    // Decode prompt
+    llama_batch batch = llama_batch_get_one(tokens.data(), (int)tokens.size());
     if (llama_decode(h->ctx, batch) != 0) {
         return env->NewStringUTF("[Error: decode fallido]");
     }
@@ -92,38 +76,35 @@ Java_com_arcadiapps_localIA_inference_LlamaCppEngine_nativeGenerate(
     llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature));
     llama_sampler_chain_add(sampler, llama_sampler_init_dist(42));
 
-    int nPos = nTokens;
+    std::string result;
+    int nPos = (int)tokens.size();
+
     for (int i = 0; i < maxTokens; i++) {
         llama_token token = llama_sampler_sample(sampler, h->ctx, -1);
-        if (llama_token_is_eog(h->model, token)) break;
+        if (llama_vocab_is_eog(vocab, token)) break;
 
-        char buf[256];
-        int n = llama_token_to_piece(h->model, token, buf, sizeof(buf), 0, true);
+        char buf[256] = {};
+        int n = llama_token_to_piece(vocab, token, buf, sizeof(buf) - 1, 0, true);
         if (n > 0) result.append(buf, n);
 
-        llama_batch next = llama_batch_get_one(&token, 1, nPos++, 0);
+        llama_batch next = llama_batch_get_one(&token, 1);
         if (llama_decode(h->ctx, next) != 0) break;
+        nPos++;
     }
 
     llama_sampler_free(sampler);
     return env->NewStringUTF(result.c_str());
-#else
-    return env->NewStringUTF("[llama.cpp no disponible]");
-#endif
 }
 
 JNIEXPORT void JNICALL
 Java_com_arcadiapps_localIA_inference_LlamaCppEngine_nativeFree(
-        JNIEnv * /* env */, jobject /* this */, jlong handle) {
-#if LLAMA_AVAILABLE
-    if (handle == 0L) return;
-    struct LlamaHandle { llama_model *model; llama_context *ctx; };
-    auto *h = reinterpret_cast<LlamaHandle *>(handle);
+        JNIEnv *, jobject, jlong jHandle) {
+    if (!jHandle) return;
+    auto *h = reinterpret_cast<LlamaHandle *>(jHandle);
     llama_free(h->ctx);
-    llama_free_model(h->model);
+    llama_model_free(h->model);
     delete h;
     LOGI("Modelo liberado");
-#endif
 }
 
 } // extern "C"

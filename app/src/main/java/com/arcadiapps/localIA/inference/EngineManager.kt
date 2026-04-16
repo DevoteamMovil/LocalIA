@@ -5,10 +5,8 @@ import android.util.Log
 import com.arcadiapps.localIA.data.model.AIModel
 import com.arcadiapps.localIA.data.model.ModelEngine
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -35,29 +33,28 @@ class EngineManager @Inject constructor(
         if (currentModel?.id == model.id && currentEngine?.isLoaded == true) return
 
         _state.value = EngineState.Loading(model.name)
-        withContext(Dispatchers.IO) {
-            try {
-                currentEngine?.unload()
-                val modelFile = File(context.filesDir, "models/${model.fileName}")
-                if (!modelFile.exists()) throw IllegalStateException("Archivo no encontrado: ${model.fileName}")
+        try {
+            currentEngine?.unload()
+            val modelFile = File(context.filesDir, "models/${model.fileName}")
+            if (!modelFile.exists()) throw IllegalStateException("Archivo no encontrado: ${model.fileName}")
 
-                Log.d("EngineManager", "Cargando ${model.name} desde ${modelFile.absolutePath}")
+            Log.d("EngineManager", "Cargando ${model.name} desde ${modelFile.absolutePath}")
 
-                val engine: InferenceEngine = when (model.engine) {
-                    ModelEngine.MEDIAPIPE -> MediaPipeTextEngine(context)
-                    ModelEngine.LLAMA_CPP -> LlamaCppEngine(nThreads = 4, nCtx = model.contextLength)
-                    ModelEngine.WHISPER   -> MediaPipeTextEngine(context)
-                }
-                engine.loadModel(modelFile.absolutePath)
-                currentEngine = engine
-                currentModel = model
-                currentModelPath = modelFile.absolutePath
-                _state.value = EngineState.Ready(model)
-                Log.d("EngineManager", "Modelo listo: ${model.name}")
-            } catch (e: Exception) {
-                Log.e("EngineManager", "Error cargando modelo", e)
-                _state.value = EngineState.Error(e.message ?: "Error desconocido")
+            val engine: InferenceEngine = when (model.engine) {
+                ModelEngine.MEDIAPIPE -> MediaPipeTextEngine(context)
+                ModelEngine.LLAMA_CPP -> LlamaCppEngine(nThreads = 4, nCtx = model.contextLength)
+                ModelEngine.WHISPER   -> MediaPipeTextEngine(context)
             }
+            // Cada engine gestiona su propio dispatcher internamente
+            engine.loadModel(modelFile.absolutePath)
+            currentEngine = engine
+            currentModel = model
+            currentModelPath = modelFile.absolutePath
+            _state.value = EngineState.Ready(model)
+            Log.d("EngineManager", "Modelo listo: ${model.name}")
+        } catch (e: Exception) {
+            Log.e("EngineManager", "Error cargando modelo", e)
+            _state.value = EngineState.Error(e.message ?: "Error desconocido")
         }
     }
 

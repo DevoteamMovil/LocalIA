@@ -12,6 +12,7 @@ import com.arcadiapps.localIA.inference.EngineManager
 import com.arcadiapps.localIA.inference.MediaPipeTextEngine
 import com.arcadiapps.localIA.ui.settings.SettingsDataSource
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -24,6 +25,7 @@ data class ChatUiState(
     val streamingText: String = "",
     val pendingImage: android.graphics.Bitmap? = null,
     val pendingImagePath: String? = null,
+    val copiedToClipboard: Boolean = false,
     val error: String? = null
 )
 
@@ -37,6 +39,8 @@ class ChatViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+
+    private var generationJob: Job? = null
 
     val sessions = chatRepository.allSessions.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList()
@@ -76,11 +80,11 @@ class ChatViewModel @Inject constructor(
             return
         }
 
-        viewModelScope.launch {
+        generationJob = viewModelScope.launch {
             val settings = settingsDataSource.settings.first()
             val effectiveSystemPrompt = systemPrompt.ifBlank { settings.systemPrompt }
             val imagePath = _uiState.value.pendingImagePath
-            // Guardar mensaje del usuario
+
             val userMsg = ChatMessage(
                 sessionId = session.id,
                 role = MessageRole.USER,
@@ -90,45 +94,103 @@ class ChatViewModel @Inject constructor(
                 modelId = session.modelId
             )
             chatRepository.addMessage(userMsg)
-            _uiState.update { it.copy(isGenerating = true, streamingText = "", error = null,
-                pendingImage = null, pendingImagePath = null) }
-
-            // Actualizar título de sesión si es el primer mensaje
-            if (_uiState.value.messages.size <= 1) {
-                val title = text.take(40).let { if (text.length > 40) "$it…" else it }
-                chatRepository.updateSession(session.copy(title = title, updatedAt = System.currentTimeMillis()))
+            _uiState.update {
+                it.copy(isGenerating = true, streamingText = "", error = null,
+                    pendingImage = null, pendingImagePath = null)
             }
 
-            // Prompt con contexto de imagen si aplica
-            val promptWithContext = if (imagePath != null)
-                "[Imagen adjunta]\n$text"
-            else text
-
-            val sb = StringBuilder()
-            try {
-                val modelPath = engineManager.getCurrentModelPath()
-                if (settings.streamingEnabled && engine is MediaPipeTextEngine && modelPath != null) {
-                    engine.generateStreamWithListener(modelPath, promptWithContext, effectiveSystemPrompt)
-                        .collect { token ->
-                            sb.append(token)
-                            _uiState.update { it.copy(streamingText = sb.toString()) }
-                        }
-                } else {
-                    val result = engine.generate(promptWithContext, effectiveSystemPrompt)
-                    sb.append(result)
-                }
-                val assistantMsg = ChatMessage(
-                    sessionId = session.id,
-                    role = MessageRole.ASSISTANT,
-                    content = sb.toString(),
-                    modelId = session.modelId
+            if (_uiState.value.messages.size <= 1) {
+                val title = text.take(40).let { t -> if (text.length > 40) "$t…" else t }
+                chatRepository.updateSession(
+                    session.copy(title = title, updatedAt = System.currentTimeMillis())
                 )
-                chatRepository.addMessage(assistantMsg)
+            }
+
+            val promptWithContext = if (imagePath != null) "[Imagen adjunta]\n$text" else text
+            val sb = StringBuilder()
+
+            try {
+                if (settings.streamingEnabled) {
+                    engine.generateStream(promptWithContext, effectiveSystemPrompt).collect { token ->
+                        sb.append(token)
+                        _uiState.update { it.copy(streamingText = sb.toString()) }
+                    }
+                } else {
+                    sb.append(engine.generate(promptWithContext, effectiveSystemPrompt))
+                }
+                // Solo guardar si no fue cancelado
+                if (sb.isNotEmpty()) {
+                    chatRepository.addMessage(
+                        ChatMessage(
+                            sessionId = session.id,
+                            role = MessageRole.ASSISTANT,
+                            content = sb.toString(),
+                            modelId = session.modelId
+                        )
+                    )
+                }
             } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message) }
+                // Si hay texto parcial al cancelar, guardarlo igualmente
+                if (sb.isNotEmpty()) {
+                    chatRepository.addMessage(
+                        ChatMessage(
+                            sessionId = session.id,
+                            role = MessageRole.ASSISTANT,
+                            content = sb.toString() + " [interrumpido]",
+                            modelId = session.modelId
+                        )
+                    )
+                } else if (e !is kotlinx.coroutines.CancellationException) {
+                    _uiState.update { it.copy(error = e.message) }
+                }
             } finally {
                 _uiState.update { it.copy(isGenerating = false, streamingText = "") }
             }
+        }
+    }
+
+    /** Detiene la generación en curso */
+    fun stopGeneration() {
+        // Cancelar el job de coroutine
+        generationJob?.cancel()
+        generationJob = null
+
+        // Cancelar también a nivel de MediaPipe si está disponible
+        val engine = engineManager.getEngine()
+        if (engine is MediaPipeTextEngine) {
+            engine.cancelGeneration()
+        }
+
+        _uiState.update { it.copy(isGenerating = false, streamingText = "") }
+    }
+
+    /** Copia toda la conversación al portapapeles */
+    fun copyConversation(context: android.content.Context) {
+        val messages = _uiState.value.messages
+        if (messages.isEmpty()) return
+
+        val text = buildString {
+            messages.forEach { msg ->
+                val role = when (msg.role) {
+                    MessageRole.USER -> "Tú"
+                    MessageRole.ASSISTANT -> "IA"
+                    MessageRole.SYSTEM -> "Sistema"
+                }
+                appendLine("[$role]")
+                appendLine(msg.content)
+                appendLine()
+            }
+        }.trim()
+
+        val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+        val clip = android.content.ClipData.newPlainText("Conversación LocalIA", text)
+        clipboard.setPrimaryClip(clip)
+
+        _uiState.update { it.copy(copiedToClipboard = true) }
+        // Resetear el estado tras 2 segundos
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(2000)
+            _uiState.update { it.copy(copiedToClipboard = false) }
         }
     }
 

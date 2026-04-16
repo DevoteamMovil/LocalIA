@@ -30,6 +30,8 @@ class ModelRepository @Inject constructor(
 
     suspend fun getModelById(id: String): AIModel? = dao.getModelById(id)
 
+    suspend fun insertModel(model: AIModel) = dao.insertModel(model)
+
     suspend fun setActiveModel(id: String) {
         dao.deactivateAllModels()
         dao.setActiveModel(id)

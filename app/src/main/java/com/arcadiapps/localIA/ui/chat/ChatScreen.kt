@@ -1,5 +1,6 @@
 package com.arcadiapps.localIA.ui.chat
 
+import androidx.compose.animation.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -8,6 +9,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -16,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -37,6 +41,7 @@ fun ChatScreen(
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     val pickImage = rememberImagePicker { picked ->
         viewModel.setPendingImage(picked.bitmap, picked.localPath)
@@ -47,9 +52,7 @@ fun ChatScreen(
     // Auto-scroll al último mensaje
     LaunchedEffect(uiState.messages.size, uiState.streamingText) {
         val count = uiState.messages.size + if (uiState.streamingText.isNotEmpty()) 1 else 0
-        if (count > 0) {
-            scope.launch { listState.animateScrollToItem(count - 1) }
-        }
+        if (count > 0) scope.launch { listState.animateScrollToItem(count - 1) }
     }
 
     Scaffold(
@@ -58,15 +61,34 @@ fun ChatScreen(
                 title = {
                     Column {
                         Text(uiState.session?.title ?: "Chat", fontWeight = FontWeight.Bold)
-                        if (uiState.isGenerating) {
-                            Text("Generando…", style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary)
+                        AnimatedVisibility(visible = uiState.isGenerating) {
+                            Text(
+                                "Generando…",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
                         }
                     }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Volver")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver")
+                    }
+                },
+                actions = {
+                    // Botón copiar conversación
+                    if (uiState.messages.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.copyConversation(context) }) {
+                            Icon(
+                                if (uiState.copiedToClipboard) Icons.Default.CheckCircle
+                                else Icons.Default.ContentCopy,
+                                contentDescription = "Copiar conversación",
+                                tint = if (uiState.copiedToClipboard)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     }
                 }
             )
@@ -81,6 +103,7 @@ fun ChatScreen(
                         inputText = ""
                     }
                 },
+                onStop = { viewModel.stopGeneration() },
                 isGenerating = uiState.isGenerating,
                 pendingImage = uiState.pendingImage,
                 onPickImage = { pickImage() },
@@ -89,6 +112,8 @@ fun ChatScreen(
         }
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+
+            // Banner de error
             uiState.error?.let { error ->
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
@@ -105,9 +130,43 @@ fun ChatScreen(
                             modifier = Modifier.weight(1f)
                         )
                         IconButton(onClick = viewModel::clearError) {
-                            Icon(Icons.Default.Close, contentDescription = "Cerrar",
-                                tint = MaterialTheme.colorScheme.onErrorContainer)
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Cerrar",
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
                         }
+                    }
+                }
+            }
+
+            // Toast de copiado
+            AnimatedVisibility(
+                visible = uiState.copiedToClipboard,
+                enter = fadeIn() + slideInVertically(),
+                exit = fadeOut() + slideOutVertically()
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Conversación copiada",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
                     }
                 }
             }
@@ -121,13 +180,9 @@ fun ChatScreen(
                 items(uiState.messages, key = { it.id }) { message ->
                     MessageBubble(message = message)
                 }
-                // Burbuja de streaming
                 if (uiState.streamingText.isNotEmpty()) {
-                    item {
-                        StreamingBubble(text = uiState.streamingText)
-                    }
+                    item { StreamingBubble(text = uiState.streamingText) }
                 }
-                // Indicador de carga
                 if (uiState.isGenerating && uiState.streamingText.isEmpty()) {
                     item { ThinkingIndicator() }
                 }
@@ -152,7 +207,6 @@ private fun MessageBubble(message: ChatMessage) {
             )
         }
         Column(horizontalAlignment = if (isUser) Alignment.End else Alignment.Start) {
-            // Imagen adjunta
             if (message.type == MessageType.IMAGE && message.mediaPath != null) {
                 AsyncImage(
                     model = File(message.mediaPath),
@@ -245,9 +299,9 @@ private fun ThinkingIndicator() {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                CircularProgressIndicator(modifier = Modifier.size(8.dp), strokeWidth = 1.5.dp)
-                CircularProgressIndicator(modifier = Modifier.size(8.dp), strokeWidth = 1.5.dp)
-                CircularProgressIndicator(modifier = Modifier.size(8.dp), strokeWidth = 1.5.dp)
+                repeat(3) {
+                    CircularProgressIndicator(modifier = Modifier.size(8.dp), strokeWidth = 1.5.dp)
+                }
             }
         }
     }
@@ -258,32 +312,22 @@ private fun ChatInputBar(
     text: String,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
+    onStop: () -> Unit,
     isGenerating: Boolean,
     pendingImage: android.graphics.Bitmap? = null,
     onPickImage: () -> Unit = {},
     onClearImage: () -> Unit = {}
 ) {
-    Surface(
-        tonalElevation = 3.dp,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier
-                .navigationBarsPadding()
-                .imePadding()
-        ) {
-            // Preview de imagen pendiente
+    Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.navigationBarsPadding().imePadding()) {
+
+            // Preview imagen pendiente
             if (pendingImage != null) {
-                Box(
-                    modifier = Modifier
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                ) {
+                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Image(
                         bitmap = pendingImage.asImageBitmap(),
                         contentDescription = "Imagen seleccionada",
-                        modifier = Modifier
-                            .height(100.dp)
-                            .clip(RoundedCornerShape(8.dp)),
+                        modifier = Modifier.height(100.dp).clip(RoundedCornerShape(8.dp)),
                         contentScale = ContentScale.FillHeight
                     )
                     IconButton(
@@ -306,26 +350,51 @@ private fun ChatInputBar(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.Bottom
             ) {
-                // Botón imagen
-                IconButton(onClick = onPickImage, enabled = !isGenerating) {
-                    Icon(Icons.Default.Image, contentDescription = "Adjuntar imagen",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                // Botón imagen (solo cuando no genera)
+                AnimatedVisibility(visible = !isGenerating) {
+                    IconButton(onClick = onPickImage) {
+                        Icon(
+                            Icons.Default.Image,
+                            contentDescription = "Adjuntar imagen",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
+
                 OutlinedTextField(
                     value = text,
                     onValueChange = onTextChange,
-                    placeholder = { Text("Escribe un mensaje…") },
+                    placeholder = { Text(if (isGenerating) "Generando…" else "Escribe un mensaje…") },
                     modifier = Modifier.weight(1f),
                     maxLines = 5,
                     shape = RoundedCornerShape(24.dp),
                     enabled = !isGenerating
                 )
+
                 Spacer(Modifier.width(8.dp))
-                FilledIconButton(
-                    onClick = onSend,
-                    enabled = (text.isNotBlank() || pendingImage != null) && !isGenerating
-                ) {
-                    Icon(Icons.Default.Send, contentDescription = "Enviar")
+
+                // Botón STOP durante generación / SEND en reposo
+                AnimatedContent(
+                    targetState = isGenerating,
+                    label = "send_stop_button"
+                ) { generating ->
+                    if (generating) {
+                        FilledIconButton(
+                            onClick = onStop,
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Icon(Icons.Default.Stop, contentDescription = "Parar generación")
+                        }
+                    } else {
+                        FilledIconButton(
+                            onClick = onSend,
+                            enabled = text.isNotBlank() || pendingImage != null
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Enviar")
+                        }
+                    }
                 }
             }
         }
