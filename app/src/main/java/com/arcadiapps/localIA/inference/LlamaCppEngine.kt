@@ -56,9 +56,12 @@ class LlamaCppEngine(
         }
     }
 
-    override fun generateStream(prompt: String, systemPrompt: String): Flow<String> = flow {
-        val full = generate(prompt, systemPrompt)
-        // Emitir en chunks de ~6 chars para simular streaming
+    override fun generateStream(
+        prompt: String,
+        systemPrompt: String,
+        history: List<com.arcadiapps.localIA.data.model.ChatMessage>
+    ): Flow<String> = flow {
+        val full = generate(prompt, systemPrompt, history)
         var i = 0
         while (i < full.length) {
             val end = minOf(i + 6, full.length)
@@ -67,12 +70,15 @@ class LlamaCppEngine(
         }
     }.flowOn(Dispatchers.IO)
 
-    override suspend fun generate(prompt: String, systemPrompt: String): String =
-        withContext(Dispatchers.IO) {
-            if (!isLoaded) throw IllegalStateException("Modelo no cargado")
-            val fullPrompt = buildPrompt(prompt, systemPrompt)
-            nativeGenerate(nativeHandle, fullPrompt, 1024, 0.8f, 40)
-        }
+    override suspend fun generate(
+        prompt: String,
+        systemPrompt: String,
+        history: List<com.arcadiapps.localIA.data.model.ChatMessage>
+    ): String = withContext(Dispatchers.IO) {
+        if (!isLoaded) throw IllegalStateException("Modelo no cargado")
+        val fullPrompt = buildFullPrompt(prompt, systemPrompt, history)
+        nativeGenerate(nativeHandle, fullPrompt, 1024, 0.8f, 40)
+    }
 
     override fun unload() {
         nativeFree(nativeHandle)
@@ -80,9 +86,23 @@ class LlamaCppEngine(
         isLoaded = false
     }
 
-    private fun buildPrompt(user: String, system: String): String =
-        if (system.isNotBlank())
-            "<|im_start|>system\n$system<|im_end|>\n<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n"
-        else
-            "<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n"
+    private fun buildFullPrompt(
+        user: String,
+        system: String,
+        history: List<com.arcadiapps.localIA.data.model.ChatMessage>
+    ): String = buildString {
+        if (system.isNotBlank()) {
+            append("<|im_start|>system\n$system<|im_end|>\n")
+        }
+        history.forEach { msg ->
+            when (msg.role) {
+                com.arcadiapps.localIA.data.model.MessageRole.USER ->
+                    append("<|im_start|>user\n${msg.content}<|im_end|>\n")
+                com.arcadiapps.localIA.data.model.MessageRole.ASSISTANT ->
+                    append("<|im_start|>assistant\n${msg.content}<|im_end|>\n")
+                else -> {}
+            }
+        }
+        append("<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n")
+    }
 }

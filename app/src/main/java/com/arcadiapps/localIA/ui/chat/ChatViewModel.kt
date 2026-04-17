@@ -107,16 +107,23 @@ class ChatViewModel @Inject constructor(
             }
 
             val promptWithContext = if (imagePath != null) "[Imagen adjunta]\n$text" else text
+
+            // Construir historial completo para que el modelo tenga contexto
+            val history = _uiState.value.messages
+                .filter { it.role != MessageRole.SYSTEM }
+                .dropLast(1) // el último es el mensaje que acabamos de añadir
+
             val sb = StringBuilder()
 
             try {
                 if (settings.streamingEnabled) {
-                    engine.generateStream(promptWithContext, effectiveSystemPrompt).collect { token ->
-                        sb.append(token)
-                        _uiState.update { it.copy(streamingText = sb.toString()) }
-                    }
+                    engine.generateStream(promptWithContext, effectiveSystemPrompt, history)
+                        .collect { token ->
+                            sb.append(token)
+                            _uiState.update { it.copy(streamingText = sb.toString()) }
+                        }
                 } else {
-                    sb.append(engine.generate(promptWithContext, effectiveSystemPrompt))
+                    sb.append(engine.generate(promptWithContext, effectiveSystemPrompt, history))
                 }
                 // Solo guardar si no fue cancelado
                 if (sb.isNotEmpty()) {

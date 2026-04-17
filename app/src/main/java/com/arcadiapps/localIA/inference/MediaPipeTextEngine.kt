@@ -2,6 +2,8 @@ package com.arcadiapps.localIA.inference
 
 import android.content.Context
 import android.util.Log
+import com.arcadiapps.localIA.data.model.ChatMessage
+import com.arcadiapps.localIA.data.model.MessageRole
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
 import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession
@@ -13,10 +15,6 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 
-/**
- * Motor MediaPipe LLM Inference API v0.10.33+
- * Nueva arquitectura: LlmInference (carga modelo) + LlmInferenceSession (generación)
- */
 class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
 
     private var llmInference: LlmInference? = null
@@ -26,7 +24,7 @@ class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
 
     var temperature: Float = 0.8f
     var topK: Int = 40
-    var maxTokens: Int = 1024
+    var maxTokens: Int = 512
 
     companion object {
         private const val TAG = "MediaPipeEngine"
@@ -53,17 +51,21 @@ class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
         }
     }
 
-    override fun generateStream(prompt: String, systemPrompt: String): Flow<String> = callbackFlow {
-        val inference = llmInference ?: run { close(IllegalStateException("Modelo no cargado")); awaitClose(); return@callbackFlow }
-        val fullPrompt = buildPrompt(prompt, systemPrompt)
-        Log.d(TAG, "Iniciando streaming")
+    override fun generateStream(
+        prompt: String,
+        systemPrompt: String,
+        history: List<ChatMessage>
+    ): Flow<String> = callbackFlow {
+        val inference = llmInference ?: run {
+            close(IllegalStateException("Modelo no cargado"))
+            awaitClose()
+            return@callbackFlow
+        }
+        Log.d(TAG, "Iniciando streaming, historial: ${history.size} mensajes")
         try {
-            val sessionOptions = LlmInferenceSessionOptions.builder()
-                .setTopK(topK)
-                .setTemperature(temperature)
-                .setRandomSeed(101)
-                .build()
-            val session = LlmInferenceSession.createFromOptions(inference, sessionOptions)
+            val session = createSession(inference)
+            val fullPrompt = buildFullPrompt(prompt, systemPrompt, history)
+            Log.d(TAG, "Prompt (primeros 200 chars): ${fullPrompt.take(200)}")
             session.addQueryChunk(fullPrompt)
             val future = session.generateResponseAsync { partial, done ->
                 if (!partial.isNullOrEmpty()) trySend(partial)
@@ -80,21 +82,19 @@ class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
         }
     }.flowOn(Dispatchers.Main)
 
-    override suspend fun generate(prompt: String, systemPrompt: String): String =
-        withContext(Dispatchers.Main) {
-            val inference = llmInference ?: throw IllegalStateException("Modelo no cargado")
-            val fullPrompt = buildPrompt(prompt, systemPrompt)
-            val sessionOptions = LlmInferenceSessionOptions.builder()
-                .setTopK(topK)
-                .setTemperature(temperature)
-                .setRandomSeed(101)
-                .build()
-            val session = LlmInferenceSession.createFromOptions(inference, sessionOptions)
-            session.addQueryChunk(fullPrompt)
-            val result = session.generateResponse()
-            session.close()
-            result
-        }
+    override suspend fun generate(
+        prompt: String,
+        systemPrompt: String,
+        history: List<ChatMessage>
+    ): String = withContext(Dispatchers.Main) {
+        val inference = llmInference ?: throw IllegalStateException("Modelo no cargado")
+        val session = createSession(inference)
+        val fullPrompt = buildFullPrompt(prompt, systemPrompt, history)
+        session.addQueryChunk(fullPrompt)
+        val result = session.generateResponse()
+        session.close()
+        result
+    }
 
     override fun unload() {
         try { llmInference?.close() } catch (_: Exception) {}
@@ -102,15 +102,68 @@ class MediaPipeTextEngine(private val context: Context) : InferenceEngine {
         isLoaded = false
     }
 
-    fun cancelGeneration() {
-        // LlmInferenceSession.cancelGenerateResponseAsync() se llama desde el flow
-        // El job de coroutine ya se cancela desde ChatViewModel
-        // Esta función existe para compatibilidad futura con cancelación nativa
+    fun cancelGeneration() { /* cancelación via future.cancel en awaitClose */ }
+
+    private fun createSession(inference: LlmInference): LlmInferenceSession {
+        val sessionOptions = LlmInferenceSessionOptions.builder()
+            .setTopK(topK)
+            .setTemperature(temperature)
+            .setRandomSeed(101)
+            .build()
+        return LlmInferenceSession.createFromOptions(inference, sessionOptions)
     }
 
-    private fun buildPrompt(user: String, system: String): String =
-        if (system.isNotBlank())
-            "<|im_start|>system\n$system<|im_end|>\n<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n"
-        else
-            "<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n"
+    /**
+     * Construye el prompt completo en formato ChatML (Qwen 2.5):
+     *
+     *   <|im_start|>system
+     *   {system}<|im_end|>
+     *   <|im_start|>user
+     *   {msg1}<|im_end|>
+     *   <|im_start|>assistant
+     *   {resp1}<|im_end|>
+     *   ...
+     *   <|im_start|>user
+     *   {prompt}<|im_end|>
+     *   <|im_start|>assistant
+     *
+     * El modelo para de generar cuando produce <|im_end|> o <|im_start|>user
+     */
+    private fun buildFullPrompt(
+        currentMessage: String,
+        systemPrompt: String,
+        history: List<ChatMessage>
+    ): String = buildString {
+        // System prompt
+        if (systemPrompt.isNotBlank()) {
+            append("<|im_start|>system\n")
+            append(systemPrompt)
+            append("<|im_end|>\n")
+        }
+
+        // Historial de turnos anteriores
+        history.forEach { msg ->
+            when (msg.role) {
+                MessageRole.USER -> {
+                    append("<|im_start|>user\n")
+                    append(msg.content)
+                    append("<|im_end|>\n")
+                }
+                MessageRole.ASSISTANT -> {
+                    append("<|im_start|>assistant\n")
+                    append(msg.content)
+                    append("<|im_end|>\n")
+                }
+                else -> {}
+            }
+        }
+
+        // Mensaje actual del usuario
+        append("<|im_start|>user\n")
+        append(currentMessage)
+        append("<|im_end|>\n")
+
+        // Inicio del turno del asistente — el modelo completa desde aquí
+        append("<|im_start|>assistant\n")
+    }
 }
